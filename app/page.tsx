@@ -122,7 +122,7 @@ export default function Home() {
         // Auto stop after 8 seconds
         setTimeout(() => {
           if (recorder.state === 'recording') recorder.stop()
-        }, 8000)
+        }, 6000)
       })
       .catch(() => {
         alert('Microphone access denied. Please allow microphone access.')
@@ -184,7 +184,7 @@ export default function Home() {
 
         {isListening && (
           <div className="text-center text-sm text-blue-400 mb-2 animate-pulse">
-            🎤 Listening... (speak now, auto-stops in 8s)
+            🎤 Listening... (speak now, auto-stops in 6s)
           </div>
         )}
         {isSpeaking && (
