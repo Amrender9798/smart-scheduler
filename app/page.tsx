@@ -20,23 +20,40 @@ export default function Home() {
   const bottomRef = useRef<HTMLDivElement>(null)
   const recognitionRef = useRef<SpeechRecognition | null>(null)
 
-  // Auto scroll to bottom
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Text to speech
-  const speak = (text: string) => {
-    window.speechSynthesis.cancel()
-    const utterance = new SpeechSynthesisUtterance(text)
-    utterance.rate = 1.0
-    utterance.pitch = 1.0
-    utterance.onstart = () => setIsSpeaking(true)
-    utterance.onend = () => setIsSpeaking(false)
-    window.speechSynthesis.speak(utterance)
+  // Groq TTS — natural sounding voice
+  const speak = async (text: string) => {
+    try {
+      setIsSpeaking(true)
+      const response = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      })
+
+      if (!response.ok) throw new Error('TTS failed')
+
+      const audioBuffer = await response.arrayBuffer()
+      const audioContext = new AudioContext()
+      const decodedAudio = await audioContext.decodeAudioData(audioBuffer)
+      const source = audioContext.createBufferSource()
+      source.buffer = decodedAudio
+      source.connect(audioContext.destination)
+      source.onended = () => setIsSpeaking(false)
+      source.start(0)
+    } catch (error) {
+      console.error('TTS error:', error)
+      // Fallback to browser TTS if Groq TTS fails
+      const utterance = new SpeechSynthesisUtterance(text)
+      utterance.onend = () => setIsSpeaking(false)
+      window.speechSynthesis.speak(utterance)
+    }
   }
 
-  // Send message to API
+  // Send message to chat API
   const sendMessage = async (text: string) => {
     if (!text.trim()) return
 
@@ -61,7 +78,7 @@ export default function Home() {
       }
 
       setMessages(prev => [...prev, assistantMessage])
-      speak(data.reply) // speak the response
+      await speak(data.reply)
     } catch (error) {
       console.error(error)
     } finally {
@@ -69,36 +86,54 @@ export default function Home() {
     }
   }
 
-  // Voice input using Web Speech API
+  // Groq Whisper STT — accurate speech recognition
   const startListening = () => {
-    const SpeechRecognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then(stream => {
+        const recorder = new MediaRecorder(stream)
+        const chunks: BlobPart[] = []
 
-    if (!SpeechRecognition) {
-      alert('Speech recognition not supported in this browser. Use Chrome.')
-      return
-    }
+        recorder.ondataavailable = (e) => chunks.push(e.data)
 
-    const recognition = new SpeechRecognition()
-    recognition.lang = 'en-US'
-    recognition.interimResults = false
+        recorder.onstop = async () => {
+          setIsListening(false)
+          const blob = new Blob(chunks, { type: 'audio/webm' })
+          const formData = new FormData()
+          formData.append('audio', blob, 'recording.webm')
 
-    recognition.onstart = () => setIsListening(true)
-    recognition.onend = () => setIsListening(false)
+          try {
+            const response = await fetch('/api/stt', {
+              method: 'POST',
+              body: formData
+            })
+            const { text } = await response.json()
+            if (text?.trim()) sendMessage(text)
+          } catch (err) {
+            console.error('STT error:', err)
+          }
 
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      const transcript = event.results[0][0].transcript
-      sendMessage(transcript)
-    }
+          stream.getTracks().forEach(t => t.stop())
+        }
 
-    recognition.onerror = () => setIsListening(false)
+        recorder.start()
+        recognitionRef.current = recorder as unknown as SpeechRecognition
+        setIsListening(true)
 
-    recognitionRef.current = recognition
-    recognition.start()
+        // Auto stop after 8 seconds
+        setTimeout(() => {
+          if (recorder.state === 'recording') recorder.stop()
+        }, 8000)
+      })
+      .catch(() => {
+        alert('Microphone access denied. Please allow microphone access.')
+      })
   }
 
   const stopListening = () => {
-    recognitionRef.current?.stop()
+    const recorder = recognitionRef.current as unknown as MediaRecorder
+    if (recorder && recorder.state === 'recording') {
+      recorder.stop()
+    }
     setIsListening(false)
   }
 
@@ -130,7 +165,6 @@ export default function Home() {
           </div>
         ))}
 
-        {/* Loading indicator */}
         {isLoading && (
           <div className="flex justify-start">
             <div className="bg-gray-800 rounded-2xl px-4 py-3">
@@ -148,30 +182,27 @@ export default function Home() {
       {/* Input Area */}
       <div className="p-4 border-t border-gray-800">
 
-        {/* Voice status */}
         {isListening && (
           <div className="text-center text-sm text-blue-400 mb-2 animate-pulse">
-            Listening...
+            🎤 Listening... (speak now, auto-stops in 8s)
           </div>
         )}
         {isSpeaking && (
           <div className="text-center text-sm text-green-400 mb-2 animate-pulse">
-            Speaking...
+            🔊 Speaking...
           </div>
         )}
 
         <div className="flex gap-2">
-          {/* Text input */}
           <input
             type="text"
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && sendMessage(input)}
-            placeholder="Type a message..."
+            placeholder="Type a message or use mic..."
             className="flex-1 bg-gray-800 rounded-full px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
           />
 
-          {/* Send button */}
           <button
             onClick={() => sendMessage(input)}
             disabled={isLoading || !input.trim()}
@@ -180,13 +211,12 @@ export default function Home() {
             ➤
           </button>
 
-          {/* Voice button */}
           <button
             onClick={isListening ? stopListening : startListening}
-            disabled={isLoading}
+            disabled={isLoading || isSpeaking}
             className={`rounded-full w-10 h-10 flex items-center justify-center transition-colors ${
               isListening
-                ? 'bg-red-500 hover:bg-red-600'
+                ? 'bg-red-500 hover:bg-red-600 animate-pulse'
                 : 'bg-gray-700 hover:bg-gray-600'
             }`}
           >
