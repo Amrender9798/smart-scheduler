@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import Groq from 'groq-sdk'
+import OpenAI from "openai";
 import { getSystemPrompt } from "@/lib/prompts";
 import { tools } from "@/lib/tools";
 import { getAvailableSlots, bookMeeting, getEvents } from "@/lib/calendar";
 import { addDays, parseISO } from "date-fns";
 
-const openai = new Groq({ apiKey: process.env.GROQ_API_KEY })
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 async function executeTool(toolName: string, args: Record<string, unknown>) {
   if (toolName === "get_available_slots") {
@@ -85,11 +85,11 @@ export async function POST(req: NextRequest) {
 
     // First call to LLM — may return a tool call or a direct response
     const response = await openai.chat.completions.create({
-      model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+      model: "gpt-4o", // Use a valid OpenAI model
       messages: [{ role: "system", content: getSystemPrompt() }, ...messages],
       tools: tools,
       tool_choice: "auto",
-      parallel_tool_calls: false
+      parallel_tool_calls: false,
     });
 
     const message = response.choices[0].message;
@@ -108,7 +108,7 @@ export async function POST(req: NextRequest) {
 
       // Send result back to LLM so it can form a natural response
       const finalResponse = await openai.chat.completions.create({
-        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        model: "gpt-4o",
         messages: [
           { role: "system", content: getSystemPrompt() },
           ...messages,
@@ -120,7 +120,7 @@ export async function POST(req: NextRequest) {
           },
         ],
         tools: tools,
-        parallel_tool_calls: false
+        parallel_tool_calls: false,
       });
 
       return NextResponse.json({

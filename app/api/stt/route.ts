@@ -1,26 +1,26 @@
-import { NextRequest, NextResponse } from 'next/server'
-import Groq from 'groq-sdk'
+import { NextRequest, NextResponse } from "next/server";
+import OpenAI from "openai";
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 export async function POST(req: NextRequest) {
   try {
-    const formData = await req.formData()
-    const audio = formData.get('audio') as File
+    const formData = await req.formData();
+    const audio = formData.get("audio") as File;
 
     if (!audio) {
-      return NextResponse.json({ error: 'No audio provided' }, { status: 400 })
+      return NextResponse.json({ error: "No audio provided" }, { status: 400 });
     }
 
-    const transcription = await groq.audio.transcriptions.create({
+    const transcription = await openai.audio.transcriptions.create({
       file: audio,
-      model: 'whisper-large-v3-turbo',
-      language: 'en'
-    })
+      model: "whisper-1", // or another available OpenAI Whisper model
+      language: "en",
+    });
 
-    return NextResponse.json({ text: transcription.text })
+    return NextResponse.json({ text: transcription.text });
   } catch (error) {
-    console.error('STT error:', error)
-    return NextResponse.json({ error: 'STT failed' }, { status: 500 })
+    console.error("STT error:", error);
+    return NextResponse.json({ error: "STT failed" }, { status: 500 });
   }
 }
