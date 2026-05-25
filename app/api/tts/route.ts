@@ -12,7 +12,7 @@ export async function POST(req: NextRequest) {
     }
 
     const response = await openai.audio.speech.create({
-      model: "tts-1-hd", // or 'tts-1'
+      model: "tts-1", // or 'tts-1'
       voice: "nova", // or 'alloy', 'echo', 'fable', 'onyx', 'shimmer'
       input: text,
       response_format: "wav",
