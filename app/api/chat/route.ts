@@ -1,18 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { google } from 'googleapis'
-
-function getCalendarClient() {
-  const auth = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET
-  )
-  auth.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN })
-  return google.calendar({ version: 'v3', auth })
-}
+import { getServerSession } from 'next-auth'
+import { getCalendarClient } from '@/lib/calendar'
 
 export async function POST(req: NextRequest) {
+  // Get user's session
+  const session = await getServerSession()
+
+  if (!session?.refreshToken) {
+    return NextResponse.json(
+      { error: 'Not authenticated' },
+      { status: 401 }
+    )
+  }
+
   const { function: fn, args } = await req.json()
-  const calendar = getCalendarClient()
+  const calendar = getCalendarClient(session.refreshToken)
+
   try {
     if (fn === 'check_calendar_availability') {
       const res = await calendar.freebusy.query({

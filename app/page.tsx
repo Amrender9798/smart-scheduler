@@ -2,6 +2,7 @@
 import React, { useState, useRef } from 'react'
 import { Mic, MicOff, Calendar, ExternalLink } from 'lucide-react'
 import { motion } from 'framer-motion'
+import { useSession, signIn, signOut } from 'next-auth/react'
 
 interface Meeting {
   summary: string
@@ -12,19 +13,17 @@ interface Meeting {
   eventId: string
 }
 
-
 export default function Home() {
+  const { data: session, status: authStatus } = useSession()
   const [isConnected, setIsConnected] = useState(false)
-  const [isBusy, setIsBusy] = useState(false);
-  const [status, setStatus] = useState("Disconnected. Click to connect.")
+  const [isBusy, setIsBusy] = useState(false)
+  const [connectionStatus, setConnectionStatus] = useState("Disconnected. Click to connect.")
   const [meeting, setMeeting] = useState<Meeting | null>(null)
 
-  // WebRTC References
   const peerConnection = useRef<RTCPeerConnection | null>(null)
   const dataChannel = useRef<RTCDataChannel | null>(null)
   const localStream = useRef<MediaStream | null>(null)
 
-  // Call your backend API for calendar actions
   const callCalendarAPI = async (fn: string, args: Record<string, string>) => {
     const res = await fetch('/api/chat', {
       method: 'POST',
@@ -35,16 +34,14 @@ export default function Home() {
   }
 
   const connect = async () => {
-    if (isBusy || isConnected) return;
-    setIsBusy(true);
+    if (isBusy || isConnected) return
+    setIsBusy(true)
     try {
-      setStatus("Connecting...")
+      setConnectionStatus("Connecting...")
 
-      // 1. Create RTCPeerConnection
       const pc = new RTCPeerConnection()
       peerConnection.current = pc
 
-      // 2. Handle incoming audio
       pc.ontrack = (e) => {
         const audioEl = document.createElement("audio")
         audioEl.autoplay = true
@@ -52,18 +49,17 @@ export default function Home() {
         document.body.appendChild(audioEl)
       }
 
-      // 3. Get mic and add track
       const ms = await navigator.mediaDevices.getUserMedia({ audio: true })
       localStream.current = ms
       pc.addTrack(ms.getTracks()[0], ms)
 
-      // 4. Create Data Channel
       const dc = pc.createDataChannel("oai-events")
       dataChannel.current = dc
 
       dc.onopen = () => {
         setIsConnected(true)
-        setStatus("Connected! Speak to the scheduling assistant...")
+        setIsBusy(false)
+        setConnectionStatus("Connected! Speak to the scheduling assistant...")
       }
 
       dc.onmessage = async (event) => {
@@ -71,8 +67,8 @@ export default function Home() {
         if (serverEvent.type === "response.function_call_arguments.done") {
           const { call_id, name, arguments: argsString } = serverEvent
           const args = JSON.parse(argsString)
-          // setStatus(`Executing system operation: ${name}...`)
           let outputData = null
+
           if (name === "get_current_time") {
             const now = new Date()
             outputData = {
@@ -84,9 +80,7 @@ export default function Home() {
               utc_offset: -now.getTimezoneOffset() / 60,
               instruction: "User speaks in their local timezone. Convert their requested times to UTC before scheduling."
             }
-          }
-
-          else if (name === "check_calendar_availability") {
+          } else if (name === "check_calendar_availability") {
             outputData = await callCalendarAPI("check_calendar_availability", {
               time_min: args.time_min,
               time_max: args.time_max
@@ -98,10 +92,13 @@ export default function Home() {
               end_time: args.end_time
             })
             setMeeting(outputData)
-            setStatus("Meeting scheduled successfully!")
+            setConnectionStatus("Meeting scheduled successfully!")
+          } else if (name === "find_reference_event") {
+            outputData = await callCalendarAPI("find_reference_event", {
+              query: args.query
+            })
           }
 
-          // Send function result
           const toolResultEvent = {
             type: "conversation.item.create",
             item: {
@@ -111,18 +108,26 @@ export default function Home() {
             }
           }
           dc.send(JSON.stringify(toolResultEvent))
-          // Prompt model for voice confirmation
           dc.send(JSON.stringify({ type: "response.create" }))
         }
       }
 
-      // 5. Create SDP offer
+      dc.onerror = () => {
+        setConnectionStatus("Connection error")
+        setIsBusy(false)
+      }
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+          setConnectionStatus("Connection lost. Click to reconnect.")
+          setIsConnected(false)
+          setIsBusy(false)
+        }
+      }
+
       const offer = await pc.createOffer()
       await pc.setLocalDescription(offer)
 
-      // setStatus("Exchanging network descriptions via server proxy...")
-
-      // 6. POST SDP to Next.js API
       const response = await fetch("/api/session", {
         method: "POST",
         headers: { "Content-Type": "text/plain" },
@@ -135,19 +140,17 @@ export default function Home() {
       }
 
       const answerSdp = await response.text()
-      await pc.setRemoteDescription({
-        type: "answer",
-        sdp: answerSdp
-      })
+      await pc.setRemoteDescription({ type: "answer", sdp: answerSdp })
+
     } catch (err) {
       console.error("WebRTC Connection Error:", err)
-      setStatus(`Connection failed`)
+      setConnectionStatus("Connection failed. Click to retry.")
+      setIsBusy(false)
       disconnect()
     }
   }
 
   const disconnect = () => {
-    if (isBusy || !isConnected) return;
     if (dataChannel.current) {
       dataChannel.current.close()
       dataChannel.current = null
@@ -160,10 +163,10 @@ export default function Home() {
       localStream.current.getTracks().forEach(track => track.stop())
       localStream.current = null
     }
-    // Remove all audio elements
     document.querySelectorAll("audio").forEach(el => el.remove())
     setIsConnected(false)
-    setStatus("Disconnected. Click to connect.")
+    setIsBusy(false)
+    setConnectionStatus("Disconnected. Click to connect.")
   }
 
   const toggleConnection = () => {
@@ -174,27 +177,90 @@ export default function Home() {
     }
   }
 
+  // Loading state
+  if (authStatus === 'loading') {
+    return (
+      <main className="flex min-h-screen bg-gray-950 items-center justify-center">
+        <p className="text-white">Loading...</p>
+      </main>
+    )
+  }
+
+  // Not logged in
+  if (!session) {
+    return (
+      <main className="flex min-h-screen bg-gray-950 items-center justify-center px-4">
+        <div className="text-center">
+          <h1 className="text-4xl font-bold text-white mb-3">
+            <span className="text-blue-400">Smart</span>{' '}
+            <span className="bg-blue-400/30 px-2 rounded">Scheduler</span>
+          </h1>
+          <p className="text-zinc-400 mb-10 text-lg">
+            Talk to your AI agent to find the perfect meeting time.
+          </p>
+          <button
+            onClick={() => signIn('google')}
+            className="bg-white text-gray-900 px-6 py-3 rounded-full font-semibold flex items-center gap-3 mx-auto hover:bg-gray-100 transition shadow-lg"
+          >
+            <img
+              src="https://www.google.com/favicon.ico"
+              className="w-5 h-5"
+              alt="Google"
+            />
+            Sign in with Google
+          </button>
+          <p className="text-zinc-600 text-xs mt-4">
+            We only access your calendar to schedule meetings
+          </p>
+        </div>
+      </main>
+    )
+  }
+
+  // Logged in — main UI
   return (
-    <main className="flex flex-col min-h-screen bg-gray-950 text-white items-center justify-center">
-      <div className="mb-8 text-center z-10">
-        <h1 className="text-4xl font-bold text-white mb-2">
-          <span className="text-blue-400">Smart</span> <span className="bg-blue-400/30 px-2 rounded">Scheduler</span>
-        </h1>
-        <p className="text-zinc-400 min-h-[1.5rem] text-lg">Talk to your AI agent to find the perfect meeting time.</p>
+    <main className="flex flex-col min-h-screen bg-gray-950 text-white items-center justify-center px-4">
+
+      {/* Top bar */}
+      <div className="absolute top-4 right-4 flex items-center gap-3">
+        <p className="text-zinc-500 text-sm hidden sm:block">
+          {session.user?.email}
+        </p>
+        <button
+          onClick={() => signOut()}
+          className="text-xs text-zinc-500 hover:text-white border border-zinc-700 px-3 py-1 rounded-full transition"
+        >
+          Sign out
+        </button>
       </div>
 
+      {/* Title */}
+      <div className="mb-8 text-center z-10">
+        <h1 className="text-4xl font-bold text-white mb-2">
+          <span className="text-blue-400">Smart</span>{' '}
+          <span className="bg-blue-400/30 px-2 rounded">Scheduler</span>
+        </h1>
+        <p className="text-zinc-400 min-h-[1.5rem] text-lg">
+          Talk to your AI agent to find the perfect meeting time.
+        </p>
+      </div>
+
+      {/* Voice Card */}
       <div className="flex flex-col items-center justify-center p-8 bg-zinc-900 rounded-3xl shadow-2xl border border-zinc-800 max-w-md w-full mx-auto relative overflow-hidden">
+
         <div className="mb-8 text-center z-10">
-          <p className="text-zinc-400 min-h-[1.5rem] text-sm">{status}</p>
+          <p className="text-zinc-400 min-h-[1.5rem] text-sm">{connectionStatus}</p>
         </div>
+
+        {/* Mic Button */}
         <motion.button
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.95 }}
           onClick={toggleConnection}
           disabled={isBusy}
           className={`z-10 w-32 h-32 rounded-full flex items-center justify-center shadow-lg transition-colors cursor-pointer ${isConnected
-            ? 'bg-red-500 hover:bg-red-600 shadow-red-500/50'
-            : 'bg-emerald-500 hover:bg-emerald-600 shadow-emerald-500/50'
+              ? 'bg-red-500 hover:bg-red-600 shadow-red-500/50'
+              : 'bg-emerald-500 hover:bg-emerald-600 shadow-emerald-500/50'
             } ${isBusy ? 'opacity-50 cursor-not-allowed' : ''}`}
         >
           {isConnected ? (
@@ -204,13 +270,18 @@ export default function Home() {
           )}
         </motion.button>
 
-        {/* Audio Visualizer Animation */}
+        {/* Audio Visualizer */}
         <div className="mt-12 flex items-center gap-1 h-12 z-10">
           {[...Array(5)].map((_, i) => (
             <motion.div
               key={i}
               animate={{ height: isConnected ? ["20%", "100%", "20%"] : "20%" }}
-              transition={{ duration: 0.8, repeat: Infinity, delay: i * 0.1, ease: "easeInOut" }}
+              transition={{
+                duration: 0.8,
+                repeat: Infinity,
+                delay: i * 0.1,
+                ease: "easeInOut"
+              }}
               className={`w-2 rounded-full ${isConnected ? 'bg-emerald-400' : 'bg-zinc-600'}`}
               style={{ height: '20%' }}
             />
@@ -231,21 +302,26 @@ export default function Home() {
               <div className="flex-1 overflow-hidden">
                 <h3 className="text-white font-semibold truncate">{meeting.summary}</h3>
                 <p className="text-zinc-400 text-sm mt-1">
-                  {new Date(meeting.start).toLocaleString()}
+                  {new Date(meeting.start).toLocaleString(undefined, {
+                    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                    dateStyle: 'medium',
+                    timeStyle: 'short'
+                  })}
                 </p>
+
                 <a
                   href={meeting.link}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-1 mt-3 text-sm text-blue-400 hover:text-blue-300 transition-colors"
                 >
-                  View on Calendar <ExternalLink className="w-3 h-3" />
-                </a>
-              </div>
+                View on Calendar <ExternalLink className="w-3 h-3" />
+              </a>
             </div>
+          </div>
           </motion.div>
         )}
-      </div>
-    </main>
+    </div>
+    </main >
   )
 }
