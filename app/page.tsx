@@ -1,228 +1,250 @@
 'use client'
-import { useState, useRef, useEffect } from 'react'
+import React, { useState, useRef } from 'react'
+import { Mic, MicOff, Calendar, ExternalLink } from 'lucide-react'
+import { motion } from 'framer-motion'
 
-interface Message {
-  role: 'user' | 'assistant'
-  content: string
+interface Meeting {
+  summary: string
+  start: string
+  end: string
+  link: string
+  status: string
+  eventId: string
 }
 
+
 export default function Home() {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      role: 'assistant',
-      content: "Hi! I'm your scheduling assistant. How can I help you today?"
-    }
-  ])
-  const [input, setInput] = useState('')
-  const [isLoading, setIsLoading] = useState(false)
-  const [isListening, setIsListening] = useState(false)
-  const [isSpeaking, setIsSpeaking] = useState(false)
-  const bottomRef = useRef<HTMLDivElement>(null)
-  const recognitionRef = useRef<SpeechRecognition | null>(null)
+  const [isConnected, setIsConnected] = useState(false)
+  const [isBusy, setIsBusy] = useState(false);
+  const [status, setStatus] = useState("Disconnected. Click to connect.")
+  const [meeting, setMeeting] = useState<Meeting | null>(null)
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  // WebRTC References
+  const peerConnection = useRef<RTCPeerConnection | null>(null)
+  const dataChannel = useRef<RTCDataChannel | null>(null)
+  const localStream = useRef<MediaStream | null>(null)
 
-  // Groq TTS — natural sounding voice
-  const speak = async (text: string) => {
-    try {
-      setIsSpeaking(true)
-      const response = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text })
-      })
-
-      if (!response.ok) throw new Error('TTS failed')
-
-      const audioBuffer = await response.arrayBuffer()
-      const audioContext = new AudioContext()
-      const decodedAudio = await audioContext.decodeAudioData(audioBuffer)
-      const source = audioContext.createBufferSource()
-      source.buffer = decodedAudio
-      source.connect(audioContext.destination)
-      source.onended = () => setIsSpeaking(false)
-      source.start(0)
-    } catch (error) {
-      console.error('TTS error:', error)
-      // Fallback to browser TTS if Groq TTS fails
-      const utterance = new SpeechSynthesisUtterance(text)
-      utterance.onend = () => setIsSpeaking(false)
-      window.speechSynthesis.speak(utterance)
-    }
+  // Call your backend API for calendar actions
+  const callCalendarAPI = async (fn: string, args: Record<string, string>) => {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ function: fn, args })
+    })
+    return await res.json()
   }
 
-  // Send message to chat API
-  const sendMessage = async (text: string) => {
-    if (!text.trim()) return
-
-    const userMessage: Message = { role: 'user', content: text }
-    const updatedMessages = [...messages, userMessage]
-
-    setMessages(updatedMessages)
-    setInput('')
-    setIsLoading(true)
-
+  const connect = async () => {
+    if (isBusy || isConnected) return;
+    setIsBusy(true);
     try {
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: updatedMessages })
-      })
+      setStatus("Connecting...")
 
-      const data = await response.json()
-      const assistantMessage: Message = {
-        role: 'assistant',
-        content: data.reply
+      // 1. Create RTCPeerConnection
+      const pc = new RTCPeerConnection()
+      peerConnection.current = pc
+
+      // 2. Handle incoming audio
+      pc.ontrack = (e) => {
+        const audioEl = document.createElement("audio")
+        audioEl.autoplay = true
+        audioEl.srcObject = e.streams[0]
+        document.body.appendChild(audioEl)
       }
 
-      setMessages(prev => [...prev, assistantMessage])
-      await speak(data.reply)
-    } catch (error) {
-      console.error(error)
-    } finally {
-      setIsLoading(false)
-    }
-  }
+      // 3. Get mic and add track
+      const ms = await navigator.mediaDevices.getUserMedia({ audio: true })
+      localStream.current = ms
+      pc.addTrack(ms.getTracks()[0], ms)
 
-  // Groq Whisper STT — accurate speech recognition
-  const startListening = () => {
-    navigator.mediaDevices.getUserMedia({ audio: true })
-      .then(stream => {
-        const recorder = new MediaRecorder(stream)
-        const chunks: BlobPart[] = []
+      // 4. Create Data Channel
+      const dc = pc.createDataChannel("oai-events")
+      dataChannel.current = dc
 
-        recorder.ondataavailable = (e) => chunks.push(e.data)
+      dc.onopen = () => {
+        setIsConnected(true)
+        setStatus("Connected! Speak to the scheduling assistant...")
+      }
 
-        recorder.onstop = async () => {
-          setIsListening(false)
-          const blob = new Blob(chunks, { type: 'audio/webm' })
-          const formData = new FormData()
-          formData.append('audio', blob, 'recording.webm')
-
-          try {
-            const response = await fetch('/api/stt', {
-              method: 'POST',
-              body: formData
-            })
-            const { text } = await response.json()
-            if (text?.trim()) sendMessage(text)
-          } catch (err) {
-            console.error('STT error:', err)
+      dc.onmessage = async (event) => {
+        const serverEvent = JSON.parse(event.data)
+        if (serverEvent.type === "response.function_call_arguments.done") {
+          const { call_id, name, arguments: argsString } = serverEvent
+          const args = JSON.parse(argsString)
+          // setStatus(`Executing system operation: ${name}...`)
+          let outputData = null
+          if (name === "get_current_time") {
+            const now = new Date()
+            outputData = {
+              current_time: now.toISOString(),
+              timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              local_time: now.toLocaleString('en-IN', {
+                timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+              }),
+              utc_offset: -now.getTimezoneOffset() / 60,
+              instruction: "User speaks in their local timezone. Convert their requested times to UTC before scheduling."
+            }
           }
 
-          stream.getTracks().forEach(t => t.stop())
+          else if (name === "check_calendar_availability") {
+            outputData = await callCalendarAPI("check_calendar_availability", {
+              time_min: args.time_min,
+              time_max: args.time_max
+            })
+          } else if (name === "schedule_meeting") {
+            outputData = await callCalendarAPI("schedule_meeting", {
+              summary: args.summary,
+              start_time: args.start_time,
+              end_time: args.end_time
+            })
+            setMeeting(outputData)
+            setStatus("Meeting scheduled successfully!")
+          }
+
+          // Send function result
+          const toolResultEvent = {
+            type: "conversation.item.create",
+            item: {
+              type: "function_call_output",
+              call_id: call_id,
+              output: JSON.stringify(outputData)
+            }
+          }
+          dc.send(JSON.stringify(toolResultEvent))
+          // Prompt model for voice confirmation
+          dc.send(JSON.stringify({ type: "response.create" }))
         }
+      }
 
-        recorder.start()
-        recognitionRef.current = recorder as unknown as SpeechRecognition
-        setIsListening(true)
+      // 5. Create SDP offer
+      const offer = await pc.createOffer()
+      await pc.setLocalDescription(offer)
 
-        // Auto stop after 8 seconds
-        setTimeout(() => {
-          if (recorder.state === 'recording') recorder.stop()
-        }, 8000)
+      // setStatus("Exchanging network descriptions via server proxy...")
+
+      // 6. POST SDP to Next.js API
+      const response = await fetch("/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: offer.sdp
       })
-      .catch(() => {
-        alert('Microphone access denied. Please allow microphone access.')
+
+      if (!response.ok) {
+        const errText = await response.text()
+        throw new Error(`Backend signaling failed: ${errText}`)
+      }
+
+      const answerSdp = await response.text()
+      await pc.setRemoteDescription({
+        type: "answer",
+        sdp: answerSdp
       })
+    } catch (err) {
+      console.error("WebRTC Connection Error:", err)
+      setStatus(`Connection failed`)
+      disconnect()
+    }
   }
 
-  const stopListening = () => {
-    const recorder = recognitionRef.current as unknown as MediaRecorder
-    if (recorder && recorder.state === 'recording') {
-      recorder.stop()
+  const disconnect = () => {
+    if (isBusy || !isConnected) return;
+    if (dataChannel.current) {
+      dataChannel.current.close()
+      dataChannel.current = null
     }
-    setIsListening(false)
+    if (peerConnection.current) {
+      peerConnection.current.close()
+      peerConnection.current = null
+    }
+    if (localStream.current) {
+      localStream.current.getTracks().forEach(track => track.stop())
+      localStream.current = null
+    }
+    // Remove all audio elements
+    document.querySelectorAll("audio").forEach(el => el.remove())
+    setIsConnected(false)
+    setStatus("Disconnected. Click to connect.")
+  }
+
+  const toggleConnection = () => {
+    if (isConnected) {
+      disconnect()
+    } else {
+      connect()
+    }
   }
 
   return (
-    <main className="flex flex-col h-screen bg-gray-950 text-white">
-
-      {/* Header */}
-      <div className="p-4 border-b border-gray-800 text-center">
-        <h1 className="text-xl font-semibold">Smart Scheduler</h1>
-        <p className="text-sm text-gray-400">AI Meeting Assistant</p>
+    <main className="flex flex-col min-h-screen bg-gray-950 text-white items-center justify-center">
+      <div className="mb-8 text-center z-10">
+        <h1 className="text-4xl font-bold text-white mb-2">
+          <span className="text-blue-400">Smart</span> <span className="bg-blue-400/30 px-2 rounded">Scheduler</span>
+        </h1>
+        <p className="text-zinc-400 min-h-[1.5rem] text-lg">Talk to your AI agent to find the perfect meeting time.</p>
       </div>
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {messages.map((msg, i) => (
-          <div
-            key={i}
-            className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
-            <div
-              className={`max-w-[75%] rounded-2xl px-4 py-3 text-sm ${
-                msg.role === 'user'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-800 text-gray-100'
-              }`}
-            >
-              {msg.content}
-            </div>
-          </div>
-        ))}
+      <div className="flex flex-col items-center justify-center p-8 bg-zinc-900 rounded-3xl shadow-2xl border border-zinc-800 max-w-md w-full mx-auto relative overflow-hidden">
+        <div className="mb-8 text-center z-10">
+          <p className="text-zinc-400 min-h-[1.5rem] text-sm">{status}</p>
+        </div>
+        <motion.button
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+          onClick={toggleConnection}
+          disabled={isBusy}
+          className={`z-10 w-32 h-32 rounded-full flex items-center justify-center shadow-lg transition-colors cursor-pointer ${isConnected
+            ? 'bg-red-500 hover:bg-red-600 shadow-red-500/50'
+            : 'bg-emerald-500 hover:bg-emerald-600 shadow-emerald-500/50'
+            } ${isBusy ? 'opacity-50 cursor-not-allowed' : ''}`}
+        >
+          {isConnected ? (
+            <MicOff className="w-12 h-12 text-white" />
+          ) : (
+            <Mic className="w-12 h-12 text-white animate-pulse" />
+          )}
+        </motion.button>
 
-        {isLoading && (
-          <div className="flex justify-start">
-            <div className="bg-gray-800 rounded-2xl px-4 py-3">
-              <div className="flex space-x-1">
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" />
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce delay-100" />
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce delay-200" />
+        {/* Audio Visualizer Animation */}
+        <div className="mt-12 flex items-center gap-1 h-12 z-10">
+          {[...Array(5)].map((_, i) => (
+            <motion.div
+              key={i}
+              animate={{ height: isConnected ? ["20%", "100%", "20%"] : "20%" }}
+              transition={{ duration: 0.8, repeat: Infinity, delay: i * 0.1, ease: "easeInOut" }}
+              className={`w-2 rounded-full ${isConnected ? 'bg-emerald-400' : 'bg-zinc-600'}`}
+              style={{ height: '20%' }}
+            />
+          ))}
+        </div>
+
+        {/* Meeting Preview Card */}
+        {meeting && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mt-8 p-4 bg-zinc-800/80 rounded-2xl border border-zinc-700 w-full z-10"
+          >
+            <div className="flex items-start gap-3">
+              <div className="p-2 bg-blue-500/20 rounded-lg text-blue-400">
+                <Calendar className="w-6 h-6" />
+              </div>
+              <div className="flex-1 overflow-hidden">
+                <h3 className="text-white font-semibold truncate">{meeting.summary}</h3>
+                <p className="text-zinc-400 text-sm mt-1">
+                  {new Date(meeting.start).toLocaleString()}
+                </p>
+                <a
+                  href={meeting.link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 mt-3 text-sm text-blue-400 hover:text-blue-300 transition-colors"
+                >
+                  View on Calendar <ExternalLink className="w-3 h-3" />
+                </a>
               </div>
             </div>
-          </div>
+          </motion.div>
         )}
-        <div ref={bottomRef} />
-      </div>
-
-      {/* Input Area */}
-      <div className="p-4 border-t border-gray-800">
-
-        {isListening && (
-          <div className="text-center text-sm text-blue-400 mb-2 animate-pulse">
-            🎤 Listening... (speak now, auto-stops in 8s)
-          </div>
-        )}
-        {isSpeaking && (
-          <div className="text-center text-sm text-green-400 mb-2 animate-pulse">
-            🔊 Speaking...
-          </div>
-        )}
-
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && sendMessage(input)}
-            placeholder="Type a message or use mic..."
-            className="flex-1 bg-gray-800 rounded-full px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
-          />
-
-          <button
-            onClick={() => sendMessage(input)}
-            disabled={isLoading || !input.trim()}
-            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-full w-10 h-10 flex items-center justify-center"
-          >
-            ➤
-          </button>
-
-          <button
-            onClick={isListening ? stopListening : startListening}
-            disabled={isLoading || isSpeaking}
-            className={`rounded-full w-10 h-10 flex items-center justify-center transition-colors ${
-              isListening
-                ? 'bg-red-500 hover:bg-red-600 animate-pulse'
-                : 'bg-gray-700 hover:bg-gray-600'
-            }`}
-          >
-            🎤
-          </button>
-        </div>
       </div>
     </main>
   )
